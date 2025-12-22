@@ -490,8 +490,8 @@ func (d *Driver) Remove() error {
 			for elapsed < d.GracefulShutdownTimeout {
 				if err := d.Stop(); err != nil {
 					log.Debugf("Failed to initiate graceful shutdown for VM %s (ID: %s): %v. Elapsed time: %d second(s)", d.MachineName, d.MachineId, err, elapsed)
-					elapsed += gracefulShutdownSleep
 					time.Sleep(gracefulShutdownSleep * time.Second)
+					elapsed += gracefulShutdownSleep
 					continue
 				}
 				// Successfully initiated graceful shutdown
@@ -510,8 +510,8 @@ func (d *Driver) Remove() error {
 						log.Infof("VM %s (ID: %s) stopped gracefully after %d second(s)", d.MachineName, d.MachineId, elapsed)
 						break
 					}
-					elapsed += gracefulShutdownSleep
 					time.Sleep(gracefulShutdownSleep * time.Second)
+					elapsed += gracefulShutdownSleep
 					log.Debugf("Waiting for VM %s (ID: %s) to stop. Elapsed time: %d second(s)", d.MachineName, d.MachineId, elapsed)
 				}
 			}
