@@ -481,26 +481,47 @@ func (d *Driver) Remove() error {
 	}
 	if machineState == state.Running {
 		if d.GracefulShutdownTimeout > 0 {
-			// graceful shutdown the machine
+			// Try to initiate graceful shutdown, retrying until timeout
 			log.Infof("Gracefully shutting down VM %s (ID: %s)", d.MachineName, d.MachineId)
-			if err := d.Stop(); err != nil {
-				return err
-			}
-			// wait for machine to stop
 			elapsed := 0
-			for elapsed <= d.GracefulShutdownTimeout {
-				if machineState, err = d.GetState(); err != nil {
-					return err
+			gracefulShutdownInitiated := false
+			
+			// Keep trying to initiate graceful shutdown until timeout
+			for elapsed < d.GracefulShutdownTimeout {
+				if err := d.Stop(); err != nil {
+					log.Debugf("Failed to initiate graceful shutdown for VM %s (ID: %s): %v. Elapsed time: %d second(s)", d.MachineName, d.MachineId, err, elapsed)
+					elapsed += gracefulShutdownSleep
+					time.Sleep(gracefulShutdownSleep * time.Second)
+					continue
 				}
-				if machineState == state.Stopped {
-					break
-				}
-				elapsed += gracefulShutdownSleep
-				time.Sleep(gracefulShutdownSleep * time.Second)
-				log.Debugf("Waiting for VM %s (ID: %s) to stop. Elapsed time: %d second(s)", d.MachineName, d.MachineId, elapsed)
+				// Successfully initiated graceful shutdown
+				gracefulShutdownInitiated = true
+				log.Infof("Graceful shutdown initiated for VM %s (ID: %s). Elapsed time: %d second(s)", d.MachineName, d.MachineId, elapsed)
+				break
 			}
-			if elapsed > d.GracefulShutdownTimeout {
-				log.Infof("Timeout for graceful shutdown of VM %s (ID: %s)", d.MachineName, d.MachineId)
+			
+			// If graceful shutdown was initiated, wait for it to complete within remaining timeout
+			if gracefulShutdownInitiated {
+				for elapsed < d.GracefulShutdownTimeout {
+					if machineState, err = d.GetState(); err != nil {
+						return err
+					}
+					if machineState == state.Stopped {
+						log.Infof("VM %s (ID: %s) stopped gracefully after %d second(s)", d.MachineName, d.MachineId, elapsed)
+						break
+					}
+					elapsed += gracefulShutdownSleep
+					time.Sleep(gracefulShutdownSleep * time.Second)
+					log.Debugf("Waiting for VM %s (ID: %s) to stop. Elapsed time: %d second(s)", d.MachineName, d.MachineId, elapsed)
+				}
+			}
+			
+			if elapsed >= d.GracefulShutdownTimeout {
+				if !gracefulShutdownInitiated {
+					log.Infof("Failed to initiate graceful shutdown for VM %s (ID: %s) within timeout of %d second(s)", d.MachineName, d.MachineId, d.GracefulShutdownTimeout)
+				} else {
+					log.Infof("Timeout for graceful shutdown of VM %s (ID: %s) after %d second(s)", d.MachineName, d.MachineId, elapsed)
+				}
 			}
 		}
 		if machineState, err = d.GetState(); err != nil {
