@@ -1,0 +1,126 @@
+name: Release s390x
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g., v0.15.0-rancher100)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: dnse-tech/machine
+  UPSTREAM_IMAGE: rancher/machine
+
+jobs:
+  build-s390x:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Get tag
+        id: get-tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building for tag: $TAG"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build s390x binary
+        run: |
+          echo "GOOS=linux" >> "$GITHUB_ENV"
+          echo "GOARCH=s390x" >> "$GITHUB_ENV"
+          echo "ARCH=s390x" >> "$GITHUB_ENV"
+          ./scripts/clean
+          ./scripts/build
+
+      - name: Package s390x artifact
+        run: ./scripts/package
+
+      - name: Upload s390x artifact to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.get-tag.outputs.tag }}"
+          ARTIFACT="dist/artifacts/rancher-machine-s390x.tar.gz"
+          if [ -f "$ARTIFACT" ]; then
+            gh release upload "$TAG" "$ARTIFACT" --clobber || echo "Failed to upload artifact"
+          fi
+
+      - name: Build and push s390x Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: package
+          push: true
+          platforms: linux/s390x
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.tag }}-s390x
+
+  create-manifest:
+    runs-on: ubuntu-latest
+    needs: build-s390x
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and retag upstream images
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          echo "Processing tag: $TAG"
+
+          for ARCH in amd64 arm64; do
+            echo "Pulling ${{ env.UPSTREAM_IMAGE }}:$TAG for $ARCH..."
+            docker pull --platform linux/$ARCH ${{ env.UPSTREAM_IMAGE }}:$TAG
+            docker tag ${{ env.UPSTREAM_IMAGE }}:$TAG ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-$ARCH
+            docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-$ARCH
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          echo "Creating manifest for $TAG..."
+
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-arm64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-s390x
+
+      - name: Inspect manifest
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG

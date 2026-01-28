@@ -1,0 +1,67 @@
+name: Sync Rancher Upstream
+
+on:
+  schedule:
+    # Run daily at 17:00 UTC (midnight Vietnam time)
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_IMAGE: rancher/machine
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new upstream releases
+        id: check
+        run: |
+          # Get latest tag from Docker Hub
+          LATEST=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.UPSTREAM_IMAGE }}/tags?page_size=10&ordering=last_updated" \
+            | jq -r '.results[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-rancher[0-9]+$' \
+            | head -n 1)
+
+          if [ -z "$LATEST" ]; then
+            echo "No valid upstream tag found"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Latest upstream tag: $LATEST"
+          echo "upstream_tag=$LATEST" >> $GITHUB_OUTPUT
+
+          # Check if we already have this release
+          if gh release view "$LATEST" &>/dev/null; then
+            echo "Release $LATEST already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release $LATEST does not exist, will create"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+          echo "found=true" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create matching release
+        if: steps.check.outputs.found == 'true' && steps.check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.check.outputs.upstream_tag }}"
+          echo "Creating release for $TAG..."
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "Synced from Docker Hub ${{ env.UPSTREAM_IMAGE }}:$TAG
+
+          This release triggers the s390x build workflow to create multi-arch images on GHCR.
+
+          **Docker Hub (upstream):** \`${{ env.UPSTREAM_IMAGE }}:$TAG\`
+          **GHCR (with s390x):** \`ghcr.io/dnse-tech/machine:$TAG\`"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
