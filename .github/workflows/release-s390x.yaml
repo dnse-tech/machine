@@ -72,7 +72,12 @@ jobs:
           TAG="${{ steps.get-tag.outputs.tag }}"
           ARTIFACT="dist/artifacts/rancher-machine-s390x.tar.gz"
           if [ -f "$ARTIFACT" ]; then
-            gh release upload "$TAG" "$ARTIFACT" --clobber || echo "Failed to upload artifact"
+            # Check if release exists, create if not
+            if ! gh release view "$TAG" &>/dev/null; then
+              echo "Release $TAG not found, creating..."
+              gh release create "$TAG" --title "$TAG" --notes "s390x multi-arch release synced from Docker Hub"
+            fi
+            gh release upload "$TAG" "$ARTIFACT" --clobber
           fi
 
       - name: Build and push s390x Docker image
