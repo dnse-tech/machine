@@ -61,12 +61,25 @@ jobs:
           ./scripts/build
 
       - name: Package s390x artifact
-        run: ./scripts/package
+        run: ./scripts/package        # OLD layout: stages ./bin/rancher-machine → ./package for the COPY
+
+      - name: Detect build context (Dockerfile layout varies across tags)
+        id: ctx
+        run: |
+          # NEW multi-stage layout uses root-relative `COPY package/...` (build from source in-Dockerfile,
+          # context=repo root). OLD layout uses bare `COPY rancher-machine`/`COPY download_driver.sh`
+          # against the pre-staged package/ dir (context=package). Pick the right context per tag.
+          if grep -q 'COPY package/' package/Dockerfile; then
+            echo "context=." >> "$GITHUB_OUTPUT"
+          else
+            echo "context=package" >> "$GITHUB_OUTPUT"
+          fi
+          echo "selected context: $(grep -q 'COPY package/' package/Dockerfile && echo . || echo package)"
 
       - name: Build and push s390x Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .                          # repo root — package/Dockerfile uses root-relative COPYs
+          context: ${{ steps.ctx.outputs.context }}
           file: package/Dockerfile
           push: true
           platforms: linux/s390x
