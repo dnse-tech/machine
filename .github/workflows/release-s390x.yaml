@@ -1,16 +1,21 @@
+# Hardened s390x + multi-arch release for dnse-tech/machine (rancher-machine).
+# Invariants: workflow_dispatch-only (no release: double-fire); no GitHub Release job; upstream legs
+# digest-pinned dynamically (amd64/arm64 resolved at runtime, combined by digest). Builds the s390x
+# binary, packages the linux/s390x container, then combines upstream amd64/arm64 + our s390x → :<tag>.
+# The done-gate is the ghcr container manifest (verify-manifest), not a release asset.
+# Reference copy in rancher-mirror/templates/rancher-app/; authoritative copy on the fork's default
+# branch (master) as .github/workflows/release-s390x.yaml.
 name: Release s390x
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g., v0.15.0-rancher100)"
+        description: "Release tag (e.g., v0.15.0-rancher143)"
         required: true
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 env:
@@ -22,19 +27,12 @@ jobs:
   build-s390x:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.get-tag.outputs.tag }}
+      tag: ${{ inputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
-
-      - name: Get tag
-        id: get-tag
-        run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Building for tag: $TAG"
+          ref: ${{ inputs.tag }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -65,28 +63,13 @@ jobs:
       - name: Package s390x artifact
         run: ./scripts/package
 
-      - name: Upload s390x artifact to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.get-tag.outputs.tag }}"
-          ARTIFACT="dist/artifacts/rancher-machine-s390x.tar.gz"
-          if [ -f "$ARTIFACT" ]; then
-            # Check if release exists, create if not
-            if ! gh release view "$TAG" &>/dev/null; then
-              echo "Release $TAG not found, creating..."
-              gh release create "$TAG" --title "$TAG" --notes "s390x multi-arch release synced from Docker Hub"
-            fi
-            gh release upload "$TAG" "$ARTIFACT" --clobber
-          fi
-
       - name: Build and push s390x Docker image
         uses: docker/build-push-action@v6
         with:
           context: package
           push: true
           platforms: linux/s390x
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.tag }}-s390x
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.tag }}-s390x
 
   create-manifest:
     runs-on: ubuntu-latest
@@ -102,30 +85,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull and retag upstream images
+      - name: Resolve upstream leg digests (H2 supply-chain pin)
+        id: legs
         run: |
+          set -euo pipefail
           TAG="${{ needs.build-s390x.outputs.tag }}"
-          echo "Processing tag: $TAG"
+          UPSTREAM="${{ env.UPSTREAM_IMAGE }}:${TAG}"
+          RAW="$(docker buildx imagetools inspect --raw "$UPSTREAM")" \
+            || { echo "::error::upstream $UPSTREAM not found"; exit 1; }
+          AMD64="$(printf '%s' "$RAW" | jq -r '.manifests[]?|select(.platform.os=="linux" and .platform.architecture=="amd64").digest' | head -1)"
+          ARM64="$(printf '%s' "$RAW" | jq -r '.manifests[]?|select(.platform.os=="linux" and .platform.architecture=="arm64").digest' | head -1)"
+          [ -n "$AMD64" ] && [ -n "$ARM64" ] || { echo "::error::upstream missing amd64/arm64 (amd64=$AMD64 arm64=$ARM64)"; exit 1; }
+          echo "amd64=$AMD64" >> "$GITHUB_OUTPUT"
+          echo "arm64=$ARM64" >> "$GITHUB_OUTPUT"
+          echo "upstream legs: amd64=$AMD64 arm64=$ARM64"
 
-          for ARCH in amd64 arm64; do
-            echo "Pulling ${{ env.UPSTREAM_IMAGE }}:$TAG for $ARCH..."
-            docker pull --platform linux/$ARCH ${{ env.UPSTREAM_IMAGE }}:$TAG
-            docker tag ${{ env.UPSTREAM_IMAGE }}:$TAG ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-$ARCH
-            docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-$ARCH
-          done
-
-      - name: Create multi-arch manifest
+      - name: Create and push digest-pinned multi-arch manifest
         run: |
+          set -euo pipefail
           TAG="${{ needs.build-s390x.outputs.tag }}"
-          echo "Creating manifest for $TAG..."
-
-          docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-amd64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-arm64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG-s390x
+          UPSTREAM="${{ env.UPSTREAM_IMAGE }}"
+          TARGET="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          docker buildx imagetools create -t "${TARGET}:${TAG}" \
+            "${TARGET}:${TAG}-s390x" \
+            "${UPSTREAM}@${{ steps.legs.outputs.amd64 }}" \
+            "${UPSTREAM}@${{ steps.legs.outputs.arm64 }}"
+          echo "Pushed multi-arch: ${TARGET}:${TAG}"
 
       - name: Inspect manifest
         run: |
+          set -euo pipefail
           TAG="${{ needs.build-s390x.outputs.tag }}"
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$TAG
