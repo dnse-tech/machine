@@ -54,11 +54,15 @@ jobs:
 
       - name: Build s390x binary
         run: |
+          # GITHUB_ENV only applies to LATER steps, so it does NOT cross-compile this step's build —
+          # export inline here too, else scripts/build emits a host-arch (amd64) binary mislabelled s390x.
           echo "GOOS=linux" >> "$GITHUB_ENV"
           echo "GOARCH=s390x" >> "$GITHUB_ENV"
           echo "ARCH=s390x" >> "$GITHUB_ENV"
+          export GOOS=linux GOARCH=s390x ARCH=s390x
           ./scripts/clean
           ./scripts/build
+          file ./bin/rancher-machine | grep -qi "S/390\|s390" || { echo "::error::rancher-machine is not s390x"; file ./bin/rancher-machine; exit 1; }
 
       - name: Package s390x artifact
         run: ./scripts/package        # OLD layout: stages ./bin/rancher-machine → ./package for the COPY
