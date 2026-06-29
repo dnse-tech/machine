@@ -15,7 +15,7 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write          # publish the s390x binary as a release asset
   packages: write
 
 env:
@@ -66,6 +66,20 @@ jobs:
 
       - name: Package s390x artifact
         run: ./scripts/package        # OLD layout: stages ./bin/rancher-machine → ./package for the COPY
+
+      # Publish the s390x tarball as a release asset so consumers (e.g. rancher/rancher's package
+      # Dockerfile) can fetch it anonymously. scripts/package writes dist/artifacts/rancher-machine-s390x.tar.gz.
+      - name: Publish s390x binary as release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          ASSET="dist/artifacts/rancher-machine-s390x.tar.gz"
+          [ -f "$ASSET" ] || { echo "::error::$ASSET not produced by scripts/package"; exit 1; }
+          gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "${{ github.repository }}" --title "$TAG" --notes "s390x build assets"
+          gh release upload "$TAG" "$ASSET" --clobber -R "${{ github.repository }}"
 
       - name: Detect build context (Dockerfile layout varies across tags)
         id: ctx
